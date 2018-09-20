@@ -1,0 +1,172 @@
+##### #####################################################
+##### Learning how to construct a shiny app
+##### #####################################################
+
+library(shiny)
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+
+
+##### ######################################
+##### DATA ANALYSIS (using SEAT data here)
+##### ######################################
+
+### GET DATA FROM CSV FILES AND MAKE DATAFRAME
+files_csv <- list.files(path = "inputs", pattern = "csv", full.names = TRUE)
+list_csv <- list()
+i = 1
+for (i in 1:length(files_csv)) {
+  x <- read.csv(files_csv[[i]], header = TRUE, sep = ",", na.strings = "NA")
+  list_csv[[i]] <- x
+  i = i + 1
+}
+#make a dataframe from the combined csv data
+df <- do.call(rbind, list_csv)
+df <- df %>%
+  mutate(linenumber = row_number())
+
+df$timestamp <- dmy_hm(df$timestamp)    ## convert to proper format with lubridate
+
+### CALCULATE THE TIMES TAKEN TO COMPLETE #
+#create new dataframe with testCode and timestamp, convert to datetime, then order by code>time
+df_timestamp <- df %>%
+  select(c("testCode", "timestamp"))
+
+df_timestamp <- df_timestamp[with(df_timestamp, order(testCode, timestamp)), ]    
+times_started <- df_timestamp[!duplicated(df_timestamp$testCode,
+                                          fromLast = FALSE), "timestamp"]
+times_finished <- df_timestamp[!duplicated(df_timestamp$testCode,
+                                           fromLast = TRUE), "timestamp"]
+test_times <- data.frame(times_started, times_finished)
+
+# loop through each row, calc time diff, add result to df
+test_lengths_list <- list()
+i <- 1
+for (i in 1:nrow(test_times)) {
+  x <- test_times$times_finished[i] - test_times$times_started[i]
+  test_lengths_list[[i]] <- x
+  i <- i + 1
+}
+test_lengths <- do.call(rbind, test_lengths_list)
+
+# combine the start & finish times with the time difference between the two
+time_taken <- cbind(test_times, test_lengths)
+
+# get average time to complete, and reformat to time
+test_lengths_avg <- as.duration(mean(test_lengths))
+
+# make a label with the average, to place on the plot
+text_for_plot_avg <- paste0("Average = ", round(test_lengths_avg, digits = 2))
+
+# TESTS TAKEN OVER TIME #
+tests_overTime <- distinct(df, dtStart) %>%
+  rename(Date = dtStart) %>%
+  mutate(Date = lubridate::dmy_hm(Date)) %>%
+  arrange(Date) %>%
+  mutate(Test_Number = row_number())    ## filter, change DT, reorder
+
+
+
+
+##### ########################
+##### SHINY STARTS HERE
+##### ########################
+
+#intructions for the user interface page
+ui <- fluidPage(
+  #title
+  titlePanel(title = h4("Shenker's Shiny Proof of Concept", align = "center")),
+  #inputs
+  fluidRow(
+    column(6,
+      textInput(inputId = "title",
+                label = "Name the plot below",
+                value = "")
+    ), # /col
+    column(6,
+      sliderInput(inputId = "num",
+                  label = "Choose a number",
+                  value = 25, min = 1, max = 500)
+    ) # /col
+  ), # /row
+  fluidRow(
+    column(6,
+      wellPanel(
+        tabsetPanel(
+          tabPanel(title = "Time Taken",
+                   plotOutput("testLength"),
+                   verbatimTextOutput("stats")
+          ), # /tab
+          tabPanel(title = "Tests Done",
+                   plotOutput("testsOverTime")
+          ) # /tab
+        ) # /tabpanel
+      ) # /well
+    ), # /col
+    column(6,
+      plotOutput("hist")
+    ) # /col
+  ), # /row
+  fluidRow(  
+    column(8,
+      inputPanel(
+        tags$h6("Click either button to generate random data"),
+        actionButton(inputId = "rnorm", label = "rnorm"),
+        actionButton(inputId = "runif", label = "runif")       
+      ), # /well
+      plotOutput("rando")
+    ) # /col
+  ) # /row
+) # /ui
+
+#instructions for the server
+server <- function(input, output) {
+  
+  rv <- reactiveValues(data = rnorm(100))
+  observeEvent(input$rnorm, { rv$data <- rnorm(100) })
+  observeEvent(input$runif, { rv$data <- runif(100) })
+  
+  #plot with random number slider - used for POC purposes only
+  output$hist <- renderPlot({
+    title <- "Random values - set # with the slider"
+    hist(floor(runif(input$num, min = 1, max = 2 * input$num)),
+         breaks = input$num,
+         main = title)
+  }) # /render
+  
+  #plot of TIME TAKEN to complete the SEAT
+  output$testLength <- renderPlot({
+    ggplot(data = time_taken, aes(x = test_lengths)) +
+      geom_bar(fill = "blue", width = 0.7) +
+      geom_vline(xintercept = mean(test_lengths), color = "red") +
+      labs(title = input$title) +
+      labs(x = "Length of Test", y = "Count of Tests") +
+      annotate("text", x = 30, y = 225, label = text_for_plot_avg) +
+      scale_x_continuous(breaks = c(0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55)) +
+      scale_y_continuous(breaks = c(0, 25, 50, 75, 100, 125, 150, 175, 200, 225, 250, 275))
+  }) # /render
+  
+  output$stats <- renderPrint({
+    summary(time_taken$test_lengths)
+  }) # /render
+  
+  output$testsOverTime <- renderPlot({
+    ggplot(data = tests_overTime, aes(x = Date, y = Test_Number)) +
+      geom_line(color = "blue") +
+      geom_point(shape = 20, size = 0.5) +
+      scale_x_datetime(breaks = date_breaks("1 months"),
+                       labels = date_format(format = "%b")) +
+      labs(x = "Time", y = "Total Tests")
+  }) # /render
+  
+  output$rando <- renderPlot ({
+    hist(rv$data)
+  }) # /render
+  
+} # /server
+
+# stitching the ui and server instructions together
+shinyApp(ui = ui, server = server)
+
+
