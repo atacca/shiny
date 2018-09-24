@@ -1,16 +1,21 @@
 ##### #####################################################
 ##### Learning how to construct a shiny app
+##### - select all this code and run (ctrl-A, ctrl-enter)
+##### - it will open a new browser tab as a live session
+##### - it's a WIP, so bear with me
 ##### #####################################################
 
 library(shiny)
+library(shinydashboard)
 library(dplyr)
 library(ggplot2)
 library(lubridate)
 
 
-##### ######################################
-##### DATA ANALYSIS (using SEAT data here)
-##### ######################################
+##### ####################################
+##### SEAT DATA ANALYSIS
+##### this stuff runs before shiny starts
+##### ####################################
 
 ### GET DATA FROM CSV FILES AND MAKE DATAFRAME
 files_csv <- list.files(path = "inputs", pattern = "csv", full.names = TRUE)
@@ -35,7 +40,7 @@ df_timestamp <- df %>%
 
 df_timestamp <- df_timestamp[with(df_timestamp, order(testCode, timestamp)), ]    
 times_started <- df_timestamp[!duplicated(df_timestamp$testCode,
-                                          fromLast = FALSE), "timestamp"]
+                                          fromLast = FALSE),  "timestamp"]
 times_finished <- df_timestamp[!duplicated(df_timestamp$testCode,
                                            fromLast = TRUE), "timestamp"]
 test_times <- data.frame(times_started, times_finished)
@@ -55,9 +60,9 @@ time_taken <- cbind(test_times, test_lengths)
 
 # get average time to complete, and reformat to time
 test_lengths_avg <- as.duration(mean(test_lengths))
-
 # make a label with the average, to place on the plot
 text_for_plot_avg <- paste0("Average = ", round(test_lengths_avg, digits = 2))
+
 
 # TESTS TAKEN OVER TIME #
 tests_overTime <- distinct(df, dtStart) %>%
@@ -67,6 +72,33 @@ tests_overTime <- distinct(df, dtStart) %>%
   mutate(Test_Number = row_number())    ## filter, change DT, reorder
 
 
+# COUNT OF TESTS BY SEDE #
+count_bySede <- df %>%
+  group_by(sede) %>%
+  summarise(n_distinct(testCode)) %>%
+  rename(School = sede, Count = `n_distinct(testCode)`) %>%
+  arrange(Count)    ## new df filtered by test code, counts by sede
+
+
+# FLUENCY CHECK DONE/NOT DONE #
+df_Fluency <- data.frame(df) %>%
+  select(c("testCode", "flCEFR")) %>%
+  transform(flCEFR = as.numeric(flCEFR))    ## new df with relevant cols
+
+df_Fluency2 <- df_Fluency[match(unique(df_Fluency$testCode),
+                                df_Fluency$testCode), ]    ## reduce to 1 row per test code
+
+count_ifDone <- sum(df_Fluency2$flCEFR > 0)                 
+count_ifNotDone <- sum(df_Fluency2$flCEFR==0)
+
+fcNames <- c("FC done", "FC not done")    ## col names for the below df
+count_ifFluencyDone <- data.frame(c(count_ifDone, count_ifNotDone)) %>%
+  cbind(fcNames) %>%
+  rename(Count = "c.count_ifDone..count_ifNotDone.",
+         If_Done = "fcNames")    ## new df for the tallies
+
+count_ifFluencyDone <- count_ifFluencyDone[, c(2, 1)]    ## reorder the df
+
 
 
 ##### ########################
@@ -74,51 +106,66 @@ tests_overTime <- distinct(df, dtStart) %>%
 ##### ########################
 
 #intructions for the user interface page
-ui <- fluidPage(
-  #title
-  titlePanel(title = h4("Shenker's Shiny Proof of Concept", align = "center")),
-  #inputs
-  fluidRow(
-    column(6,
-      textInput(inputId = "title",
-                label = "Name the plot below",
-                value = "")
-    ), # /col
-    column(6,
-      sliderInput(inputId = "num",
-                  label = "Choose a number",
-                  value = 25, min = 1, max = 500)
-    ) # /col
-  ), # /row
-  fluidRow(
-    column(6,
-      wellPanel(
-        tabsetPanel(
-          tabPanel(title = "Time Taken",
-                   plotOutput("testLength"),
-                   verbatimTextOutput("stats")
-          ), # /tab
-          tabPanel(title = "Tests Done",
-                   plotOutput("testsOverTime")
-          ) # /tab
-        ) # /tabpanel
-      ) # /well
-    ), # /col
-    column(6,
-      plotOutput("hist")
-    ) # /col
-  ), # /row
-  fluidRow(  
-    column(8,
-      inputPanel(
-        tags$h6("Click either button to generate random data"),
-        actionButton(inputId = "rnorm", label = "rnorm"),
-        actionButton(inputId = "runif", label = "runif")       
-      ), # /well
-      plotOutput("rando")
-    ) # /col
-  ) # /row
-) # /ui
+ui <- 
+  fluidPage(
+    titlePanel("SEAT Dashboard: Prototype"),
+    sidebarLayout(
+      sidebarPanel("Dashboard", width = 2),
+      mainPanel("SEAT Visualisations", width = 10,
+                #inputs
+                fluidRow(
+                  tags$h2("Proof of Concept: Shiny Dashboard")
+                ), # /row
+                
+                hr(),
+                
+                fluidRow(
+                  column(6,
+                         wellPanel(
+                           tabsetPanel(
+                             tabPanel(title = "Tests Done",
+                                      plotOutput("testsOverTime")
+                             ), # /tab
+                             tabPanel(title = "Tests by Sede",
+                                      plotOutput("testsBySede")
+                             ), # /tab
+                             tabPanel(title = "Time Taken",
+                                      plotOutput("testLength"),
+                                      verbatimTextOutput("stats")
+                             ) # /tab
+                           ) # tabset
+                         ) # /well
+                  ), # /col
+                    column(4,
+                          wellPanel(
+                            plotOutput("fluencyDone")
+                          ) # /well
+                    ) # /col
+                ), # /row
+                
+                hr(),
+                
+                fluidRow(  
+                  column(5,
+                         inputPanel(
+                           tags$h6("Click either button to generate random data"),
+                           actionButton(inputId = "rnorm", label = "rnorm"),
+                           actionButton(inputId = "runif", label = "runif")       
+                         ), # /panel
+                         plotOutput("rando")
+                  ), # /col
+                  column(5,
+                         wellPanel(
+                           sliderInput(inputId = "num",
+                                       label = "Choose a number",
+                                       value = 25, min = 1, max = 500),
+                           plotOutput("hist")        
+                         ) # /well
+                  ) # /col 
+                ) # /row)
+    )
+)
+) # /page
 
 #instructions for the server
 server <- function(input, output) {
@@ -134,7 +181,31 @@ server <- function(input, output) {
          breaks = input$num,
          main = title)
   }) # /render
-  
+
+  #quartiles of TIME TAKEN to complete the SEAT  
+  output$stats <- renderPrint({
+    summary(time_taken$test_lengths)
+  }) # /render
+
+  #plot of TESTS TAKEN OVER TIME  
+  output$testsOverTime <- renderPlot({
+    ggplot(data = tests_overTime, aes(x = Date, y = Test_Number)) +
+      geom_line(color = "blue") +
+      geom_point(shape = 20, size = 0.5) +
+      scale_x_datetime(breaks = date_breaks("1 months"),
+                       labels = date_format(format = "%b")) +
+      labs(x = "Time", y = "Total Tests")
+  }) # /render
+
+  #plot of TESTS BY SEDE
+  output$testsBySede <- renderPlot({
+    ggplot(data = count_bySede, aes(x = reorder(School, -Count), y = Count)) +
+      geom_bar(stat = "identity", fill = "steelblue") +
+      geom_text(aes(label = Count), vjust = -0.3, size = 3.5) +
+      labs(x = "School", y = "Number of Tests") +
+      theme(axis.text.x = element_text(angle = 35, hjust = 1))
+  }) # /render
+
   #plot of TIME TAKEN to complete the SEAT
   output$testLength <- renderPlot({
     ggplot(data = time_taken, aes(x = test_lengths)) +
@@ -146,20 +217,18 @@ server <- function(input, output) {
       scale_x_continuous(breaks = c(0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55)) +
       scale_y_continuous(breaks = c(0, 25, 50, 75, 100, 125, 150, 175, 200, 225, 250, 275))
   }) # /render
-  
-  output$stats <- renderPrint({
-    summary(time_taken$test_lengths)
+
+  output$fluencyDone <- renderPlot({
+    ggplot(count_ifFluencyDone, aes("", Count, fill = If_Done)) +
+      ggtitle("Fluency Check done?") +
+      geom_col(position = "fill") +
+      theme(axis.text.x = element_blank(), axis.title.x = element_blank(),
+            axis.title.y = element_blank(), legend.title = element_blank()) +
+      geom_label(aes(label = paste0(round(Count / sum(Count) * 100), "%")),
+                 position = position_fill(vjust = 0.5)) +
+      coord_polar(theta = "y")
   }) # /render
-  
-  output$testsOverTime <- renderPlot({
-    ggplot(data = tests_overTime, aes(x = Date, y = Test_Number)) +
-      geom_line(color = "blue") +
-      geom_point(shape = 20, size = 0.5) +
-      scale_x_datetime(breaks = date_breaks("1 months"),
-                       labels = date_format(format = "%b")) +
-      labs(x = "Time", y = "Total Tests")
-  }) # /render
-  
+      
   output$rando <- renderPlot ({
     hist(rv$data)
   }) # /render
