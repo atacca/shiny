@@ -1,33 +1,24 @@
-##### #####################################################
-##### Learning how to construct a shiny app
-##### #####################################################
-
 library(shiny)
 library(shinydashboard)
 library(dplyr)
 library(ggplot2)
 library(lubridate)
+library(RMySQL)
+
+# - TRUNCATED - #
+
+# - TRUNCATED - #
 
 
-##### ####################################
-##### SEAT DATA ANALYSIS
-##### ####################################
+##### #######################
+##### DATA ANALYSIS
+##### #######################
 
-### GET DATA FROM CSV FILES AND MAKE DATAFRAME
-files_csv <- list.files(path = "inputs", pattern = "csv", full.names = TRUE)
-list_csv <- list()
-i = 1
-for (i in 1:length(files_csv)) {
-  x <- read.csv(files_csv[[i]], header = TRUE, sep = ",", na.strings = "NA")
-  list_csv[[i]] <- x
-  i = i + 1
-}
-#make a dataframe from the combined csv data
-df <- do.call(rbind, list_csv)
+### TIDY UP THE DF FROM SQL IMPORT
 df <- df %>%
   mutate(linenumber = row_number())
-
-df$timestamp <- dmy_hm(df$timestamp)    ## convert to proper format with lubridate
+df$timestamp <- as.POSIXct(df$timestamp)
+df$dtStart <- as.POSIXct(df$dtStart)
 
 ### CALCULATE THE TIMES TAKEN TO COMPLETE #
 #create new dataframe with testCode and timestamp, convert to datetime, then order by code>time
@@ -53,6 +44,9 @@ test_lengths <- do.call(rbind, test_lengths_list)
 
 # combine the start & finish times with the time difference between the two
 time_taken <- cbind(test_times, test_lengths)
+time_taken <- time_taken %>%
+  rename(times = "test_lengths")
+time_taken$times <- round(time_taken$times, digits = 1)
 
 # get average time to complete, and reformat to time
 test_lengths_avg <- as.duration(mean(test_lengths))
@@ -63,7 +57,6 @@ text_for_plot_avg <- paste0("Average = ", round(test_lengths_avg, digits = 2))
 # TESTS TAKEN OVER TIME #
 tests_overTime <- distinct(df, dtStart) %>%
   rename(Date = dtStart) %>%
-  mutate(Date = lubridate::dmy_hm(Date)) %>%
   arrange(Date) %>%
   mutate(Test_Number = row_number())    ## filter, change DT, reorder
 
@@ -94,6 +87,22 @@ count_ifFluencyDone <- data.frame(c(count_ifDone, count_ifNotDone)) %>%
          If_Done = "fcNames")    ## new df for the tallies
 
 count_ifFluencyDone <- count_ifFluencyDone[, c(2, 1)]    ## reorder the df
+
+
+# TESTS TAKEN OVER TIME BY SCHOOL
+tests_overTime2 <- df[!duplicated(df["testCode"]), ] %>%
+  select(c("sede", "testCode", "dtStart"))
+tests_overTime2$dtStart <- as.Date(tests_overTime2$dtStart)
+
+#rename NAs (will need to move renaming NAs to the root df, to be done!)
+tests_overTime2$sede <- as.character(tests_overTime2$sede)
+tests_overTime2$sede[is.na(tests_overTime2$sede)] <- "Not Set"
+#schools list
+schoolsList <- unique(tests_overTime2$sede)
+
+
+## - END SEAT ANALYSIS - ##
+
 
 
 
@@ -138,7 +147,15 @@ ui <-
                           ) # /well
                     ) # /col
                 ), # /row
+ 
+                hr(),
                 
+                fluidRow(12,
+                  selectInput("school", "Choose school:",
+                              choices = schoolsList),
+                  plotOutput("testsBySchool")
+                ), # /row
+                               
                 hr(),
                 
                 fluidRow(  
@@ -180,7 +197,7 @@ server <- function(input, output) {
 
   #quartiles of TIME TAKEN to complete the SEAT  
   output$stats <- renderPrint({
-    summary(time_taken$test_lengths)
+    summary(time_taken$times)
   }) # /render
 
   #plot of TESTS TAKEN OVER TIME  
@@ -204,16 +221,18 @@ server <- function(input, output) {
 
   #plot of TIME TAKEN to complete the SEAT
   output$testLength <- renderPlot({
-    ggplot(data = time_taken, aes(x = test_lengths)) +
-      geom_bar(fill = "blue", width = 0.7) +
-      geom_vline(xintercept = mean(test_lengths), color = "red") +
-      labs(title = input$title) +
+    ggplot(data = time_taken, aes(x = time_taken$times)) +
+      geom_bar(fill = "blue", width = 0.5) +
+      geom_vline(xintercept = mean(time_taken$times), color = "red") +
+      labs(title = "Times taken to complete the SEAT") +
       labs(x = "Length of Test", y = "Count of Tests") +
-      annotate("text", x = 30, y = 225, label = text_for_plot_avg) +
-      scale_x_continuous(breaks = c(0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55)) +
-      scale_y_continuous(breaks = c(0, 25, 50, 75, 100, 125, 150, 175, 200, 225, 250, 275))
+      annotate("text", x = 35, y = 75, label = text_for_plot_avg) +
+      scale_x_continuous(breaks = seq(from = 0,
+                          to = ceiling(max(time_taken$times)) + 10, by = 5)) +
+      scale_y_continuous(breaks = seq(from = 0, to = 100, by = 25))
   }) # /render
 
+  #plot of FC done or not done
   output$fluencyDone <- renderPlot({
     ggplot(count_ifFluencyDone, aes("", Count, fill = If_Done)) +
       ggtitle("Fluency Check done?") +
@@ -224,7 +243,21 @@ server <- function(input, output) {
                  position = position_fill(vjust = 0.5)) +
       coord_polar(theta = "y")
   }) # /render
-      
+
+  #plot of tests done by sede (drop down list)
+  output$testsBySchool <- renderPlot({
+    
+    filteredSchool <- tests_overTime2 %>% filter(sede == input$school)
+    
+    ggplot(data = filteredSchool, aes(x = dtStart)) +
+    geom_histogram(color = "blue", fill = "red") +
+    labs(title = "Tests completed by School") +
+    labs(x = "Date", y = "Tests") +
+    scale_x_date(labels = date_format("%b-%Y"), date_breaks = "1 month") + 
+    theme(axis.text.x = element_text(angle = 35, hjust = 1))
+  }) # /render
+  
+  #plot of histogram w/ slider input      
   output$rando <- renderPlot ({
     hist(rv$data)
   }) # /render
@@ -234,4 +267,4 @@ server <- function(input, output) {
 # stitching the ui and server instructions together
 shinyApp(ui = ui, server = server)
 
-
+## - END SHINY, END FILE - ##
