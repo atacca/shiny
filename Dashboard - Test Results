@@ -1,0 +1,411 @@
+library(shiny)
+library(shinydashboard)
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(RMySQL)
+
+# - TRUNCATED - #
+
+## - END SQL SECTION - ##
+
+
+##### ###################
+### TIDY UP FROM IMPORT
+##### ###################
+
+df <- df %>%
+  mutate(linenumber = row_number())
+df$timestamp <- as.POSIXct(df$timestamp)
+df$dtStart <- as.POSIXct(df$dtStart)
+
+#change the sede names that either aren't relevant anymore (keep an eye on this, may be temp)
+df$sede <- gsub("^\\*", "", df$sede)
+df$sede <- gsub("Roma Spagna", "Roma Prati", df$sede)
+
+#add a new column to the base df with the time the test was done/started
+#start with a df with the columns needed
+time_testsDone <- df %>%
+  select(c("testCode", "sede", "timestamp"))
+#order the df by testcode and then time (we'll take the first question timestamp for simplicity)
+time_testsDone <- time_testsDone[with(time_testsDone, order(testCode, timestamp)), ]
+#remove duplicates, leaving the 1st entry
+time_testsDone <- data.frame(time_testsDone[!duplicated(time_testsDone$testCode), ]) %>%
+  rename(time_Done = timestamp)
+time_testsDone$time_Done <- as.POSIXct(format(time_testsDone$time_Done, "%Y-%m-%d"))
+
+#now the time_Done column will be added to the base df
+df$time_Done <- time_testsDone$time_Done[match(df$testCode, time_testsDone$testCode)]
+
+
+##### ###########
+### ANALYSIS
+##### ###########
+
+# COUNT OF TESTS BY SEDE #
+count_bySede <- df %>%
+  group_by(sede) %>%
+  summarise(n_distinct(testCode)) %>%
+  rename(Count = `n_distinct(testCode)`) %>%
+  arrange(Count)    ## new df filtered by test code, counts by sede
+
+
+# COUNT OF TESTS TODAY BY SEDE #
+#using the time_testsDone df made at the start
+#now to start the count. first to strip the hours from the timestamp
+count_testsDoneToday <- time_testsDone
+count_testsDoneToday <- count_testsDoneToday %>%
+  filter(time_Done == format(Sys.Date())) %>%
+  count(sede) %>%
+  rename(Count = n) %>%
+  arrange(desc(Count))
+count_testsDoneToday
+
+
+# TESTS TAKEN OVER TIME #
+tests_overTime <- df[!duplicated(df$testCode), ] %>%
+  rename(Date = time_Done) %>%
+  arrange(Date) %>%
+  mutate(Test_Number = row_number())    ## filter, change DT, reorder
+
+
+# TESTS TAKEN OVER TIME BY SEDE
+tests_overTime2 <- df[!duplicated(df["testCode"]), ] %>%
+  select(c("sede", "testCode", "time_Done"))
+tests_overTime2$time_Done <- as.Date(tests_overTime2$time_Done)
+
+#rename NAs (will need to move renaming NAs to the root df, to be done!)
+tests_overTime2$sede <- as.character(tests_overTime2$sede)
+tests_overTime2$sede[is.na(tests_overTime2$sede)] <- "Not Set"
+#schools list
+schoolsList <- unique(tests_overTime2$sede)
+
+
+### CALCULATE THE TIMES TAKEN TO COMPLETE #
+#create new dataframe with testCode and timestamp, convert to datetime, then order by code>time
+df_timestamp <- df %>%
+  select(c("testCode", "timestamp"))
+
+df_timestamp <- df_timestamp[with(df_timestamp, order(testCode, timestamp)), ]    
+times_started <- df_timestamp[!duplicated(df_timestamp$testCode,
+                                          fromLast = FALSE),  "timestamp"]
+times_finished <- df_timestamp[!duplicated(df_timestamp$testCode,
+                                           fromLast = TRUE), "timestamp"]
+test_times <- data.frame(times_started, times_finished)
+
+# loop through each row, calc time diff, add result to df
+test_lengths_list <- list()
+i <- 1
+for (i in 1:nrow(test_times)) {
+  x <- test_times$times_finished[i] - test_times$times_started[i]
+  test_lengths_list[[i]] <- x
+  i <- i + 1
+}
+test_lengths <- do.call(rbind, test_lengths_list)
+
+# combine the start & finish times with the time difference between the two
+time_taken <- cbind(test_times, test_lengths)
+time_taken <- time_taken %>%
+  rename(times = "test_lengths")
+time_taken$times <- round(time_taken$times, digits = 1)
+
+# get average time to complete, and reformat to time
+test_lengths_avg <- as.duration(mean(test_lengths))
+# make a label with the average, to place on the plot
+text_for_plot_avg <- paste0("Average = ", round(test_lengths_avg, digits = 2))
+
+
+# FLUENCY CHECK DONE/NOT DONE #
+df_Fluency <- data.frame(df) %>%
+  select(c("testCode", "flCEFR")) %>%
+  transform(flCEFR = as.numeric(flCEFR))    ## new df with relevant cols
+
+df_Fluency2 <- df_Fluency[match(unique(df_Fluency$testCode),
+                                df_Fluency$testCode), ]    ## reduce to 1 row per test code
+
+count_ifDone <- sum(df_Fluency2$flCEFR > 0)                 
+count_ifNotDone <- sum(df_Fluency2$flCEFR==0)
+
+fcNames <- c("FC done", "FC not done")    ## col names for the below df
+count_ifFluencyDone <- data.frame(c(count_ifDone, count_ifNotDone)) %>%
+  cbind(fcNames) %>%
+  rename(Count = "c.count_ifDone..count_ifNotDone.",
+         If_Done = "fcNames")    ## new df for the tallies
+
+count_ifFluencyDone <- count_ifFluencyDone[, c(2, 1)]    ## reorder the df
+
+
+#LATEST FEEDBACK (NOTE: REMOVED ALL TIDYTEXT DFs AS CAN'T IMPORT CUSTOM STOPWORDS FILE - TO RESOLVE!)
+#a one-off df for the latest feedback, to be sorted by date (not used in the below analysis)
+df_feedback <- df[!duplicated(df["feedback"]), ]
+df_feedback$time_Done <- sort(df_feedback$time_Done, decreasing = TRUE)
+df_feedback$time_Done <- as.character(as.Date(df_feedback$time_Done))
+df_feedback <- df_feedback %>%
+  select(c("testCode", "time_Done", "feedback"))
+
+
+## - END ANALYSIS - ##
+
+
+
+
+##### ########################
+##### SHINY STARTS HERE
+##### ########################
+
+#intructions for the user interface page
+ui <- 
+  fluidPage(theme = shinytheme("superhero"),
+            
+            titlePanel("SEAT Dashboard: Live Data"),
+            
+            hr(),
+            
+            sidebarLayout(
+              
+              sidebarPanel(width = 2,
+                           
+                           tags$img(src = "http://stats.shenker.com/logos/SEAT_Logo.jpg",
+                                    width = 165, height = 80),
+                           
+                           hr(),
+                           
+                           tags$b("Today's Date"),
+                           textOutput("dateToday"),
+                           
+                           hr(),
+                           
+                           tags$b("Tests done today:"),
+                           textOutput("testsToday_sidebar"),
+                           
+                           hr(),
+                           
+                           tags$b("Tests yesterday"),
+                           textOutput("testsYesterday_sidebar"),
+                           
+                           hr(),
+                           
+                           tags$b("Total completed:"),
+                           textOutput("totalTests_sidebar")
+                           
+              ), # /sPanel
+              
+              mainPanel(width = 10,
+                        
+                        fluidRow(
+                          column(width = 8,
+                                 wellPanel(
+                                   tabsetPanel(
+                                     tabPanel(title = "Tests Done",
+                                              plotOutput("testsOverTime")
+                                     ), # /tab
+                                     tabPanel(title = "Tests by Sede",
+                                              plotOutput("testsBySede")
+                                     ), # /tab
+                                     tabPanel(title = "Time Taken",
+                                              plotOutput("testLength"),
+                                              verbatimTextOutput("stats")
+                                     ) # /tab
+                                   ) # tabset
+                                 ) # /well
+                          ), # /col
+                          
+                          column(4,
+                                 wellPanel(
+                                   plotOutput("fluencyDone")
+                                 ) # /well
+                          ) # /col
+                          
+                        ), # /row
+                        
+                        hr(),
+                        
+                        fluidRow(
+                          tags$h5("Tests Completed by sede"),
+                          
+                          column(4,
+                                 selectInput("schoolList_plot", "Choose sede:",
+                                             choices = schoolsList) # /sInput                        
+                          ) # /col
+                        ), # /row
+                        
+                        fluidRow(
+                          wellPanel(
+                            plotOutput("testsBySchool")
+                          ) # /well
+                        ), # /row
+                        
+                        hr(),
+                        
+                        fluidRow(
+                          tags$h5("Latest Feedback"),
+                          selectInput("feedbackCount", "Select amount of feedback to see",
+                                      choices = seq(from = 5, to = 30, by = 5),
+                                      selected = 5), # /sInput
+                          tableOutput("latestFeedback")
+                        ), # /row
+                        
+                        hr(),
+                        
+                        fluidRow(  
+                          column(5,
+                                 inputPanel(
+                                   tags$h6("Click either button to generate random data"),
+                                   actionButton(inputId = "rnorm", label = "rnorm"),
+                                   actionButton(inputId = "runif", label = "runif")       
+                                 ), # /panel
+                                 plotOutput("rando")
+                          ), # /col
+                          column(5,
+                                 wellPanel(
+                                   sliderInput(inputId = "num",
+                                               label = "Choose a number",
+                                               value = 25, min = 1, max = 500
+                                   ), # /sInput
+                                   plotOutput("hist")        
+                                 ) # /well
+                          ) # /col 
+                        ) # /row
+              ) # /mainpanel
+            ) # /sLayout
+  ) # /page
+
+#instructions for the server
+server <- function(input, output) {
+  
+  #TODAY'S DATE (SIDEBAR)
+  output$dateToday <- renderText ({
+    format(Sys.Date())
+  })
+  
+  
+  #TOTAL TESTS COMPLETED (SIDEBAR)
+  output$totalTests_sidebar <- renderText ({
+    n_distinct(df$testCode)
+  })
+   
+  
+  #TEST COMPLETED TODAY & YESTERDAY (SIDEBAR)
+  testsCompleted_today <- time_testsDone %>%
+    filter(time_Done == format(Sys.Date()))
+  testsCompleted_yesterday <- time_testsDone %>%
+    filter(time_Done == format(Sys.Date()-1))
+  
+  output$testsToday_sidebar <- renderText ({
+    n_distinct(testsCompleted_today$testCode)
+  })
+  
+  output$testsYesterday_sidebar <- renderText ({
+    n_distinct(testsCompleted_yesterday$testCode)
+  })
+  
+  
+  # NUMBER OF TESTS BY SCHOOL (TEXT)
+  output$selected_testCounter <- renderText ({
+    filteredSchool_counter <- tests_overTime2 %>% filter(sede == input$schoolList_counter)
+    "Number of tests completed"
+    n_distinct(filteredSchool_counter$testCode)
+  }) # /render
+  
+  
+  #PLOT OF TESTS TAKEN OVER TIME (LINE PLOT)
+  output$testsOverTime <- renderPlot({
+    ggplot(data = tests_overTime, aes(x = Date, y = Test_Number)) +
+      geom_line(color = "blue") +
+      geom_point(shape = 20, size = 0.5) +
+      scale_x_datetime(breaks = date_breaks("1 months"),
+                       labels = date_format(format = "%b")) +
+      labs(x = "Time", y = "Total Tests")
+  }) # /render
+  
+  
+  #PLOT OF TESTS BY SEDE (BAR CHART)
+  output$testsBySede <- renderPlot({
+    ggplot(data = count_bySede, aes(x = reorder(sede, -Count), y = Count)) +
+      geom_bar(stat = "identity", fill = "steelblue") +
+      geom_text(aes(label = Count), vjust = -0.3, size = 3.5) +
+      labs(x = "Sede", y = "Number of Tests") +
+      theme(axis.text.x = element_text(angle = 35, hjust = 1))
+  }) # /render
+  
+  
+  #PLOT OF TIME TAKEN TO COMPLETE THE SEAT (BAR CHART)
+  output$testLength <- renderPlot({
+    ggplot(data = time_taken, aes(x = time_taken$times)) +
+      geom_bar(fill = "blue", width = 0.5) +
+      geom_vline(xintercept = mean(time_taken$times), color = "red") +
+      labs(title = "Times taken to complete the SEAT") +
+      labs(x = "Length of Test", y = "Count of Tests") +
+      annotate("text", x = 35, y = 75, label = text_for_plot_avg) +
+      scale_x_continuous(breaks = seq(from = 0,
+                                      to = ceiling(max(time_taken$times)) + 10, by = 5)) +
+      scale_y_continuous(breaks = seq(from = 0, to = 100, by = 25))
+  }) # /render
+  
+  
+  #QUARTILES OF TIME TAKEN TO COMPLETE THE SEAT  
+  output$stats <- renderPrint({
+    summary(time_taken$times)
+  }) # /render
+  
+  
+  #PLOT OF FC DONE/NOT DONE (PIE CHART)
+  output$fluencyDone <- renderPlot({
+    ggplot(count_ifFluencyDone, aes("", Count, fill = If_Done)) +
+      ggtitle("Fluency Check done?") +
+      geom_col(position = "fill") +
+      theme(axis.text.x = element_blank(), axis.title.x = element_blank(),
+            axis.title.y = element_blank(), legend.title = element_blank()) +
+      geom_label(aes(label = paste0(round(Count / sum(Count) * 100), "%")),
+                 position = position_fill(vjust = 0.5)) +
+      coord_polar(theta = "y")
+  }) # /render
+  
+  
+  #PLOT OF TESTS DONE BY SEDE (HISTOGRAM W/ DROP DOWN LIST)
+  output$testsBySchool <- renderPlot({
+    
+    filteredSchool_plot <- tests_overTime2 %>% filter(sede == input$schoolList_plot)
+    schoolName <- input$schoolList_plot
+    schoolTestCount <- n_distinct(filteredSchool_plot$testCode)
+    
+    ggplot(data = filteredSchool_plot, aes(x = time_Done)) +
+      geom_histogram(color = "blue", fill = "red") +
+      labs(title = paste0("SEATs completed by ", schoolName,
+                          "  (", schoolTestCount, " tests)")) +
+      labs(x = "Date", y = "Tests") +
+      scale_x_date(labels = date_format("%b-%Y"), date_breaks = "1 month") + 
+      theme(axis.text.x = element_text(angle = 35, hjust = 1))
+  }) # /render
+
+  
+  #LATEST FEEDBACK (TABLE)
+  output$latestFeedback <- renderTable({
+    head(df_feedback, n = input$feedbackCount)
+  })  
+  
+  #DUMMY CHARTS
+  rv <- reactiveValues(data = rnorm(100))
+  observeEvent(input$rnorm, { rv$data <- rnorm(100) })
+  observeEvent(input$runif, { rv$data <- runif(100) })
+  
+  #DUMMY HISTOGRAM (W/ BUTTON INPUTS)
+  output$rando <- renderPlot ({
+    hist(rv$data)
+  }) # /render
+  
+  #DUMMY HISTOGRAM (W/ SLIDER INPUT)
+  output$hist <- renderPlot({
+    title <- "Random values - set # with the slider"
+    hist(floor(runif(input$num, min = 1, max = 2 * input$num)),
+         breaks = input$num,
+         main = title)
+  }) # /render
+  
+  
+} # /server
+
+# stitching the ui and server instructions together
+shinyApp(ui = ui, server = server)
+
+## - END SHINY, END FILE - ##
